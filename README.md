@@ -177,3 +177,8 @@ pnpm build
 ---
 
 > 👤 作者：涤生AGI | 🐙 github.com/dishenglee | 📡 公众号：涤生AGI
+
+---
+
+**LINUX DO** — a new kind of community, where tech enthusiasts gather.  
+https://linux.do
