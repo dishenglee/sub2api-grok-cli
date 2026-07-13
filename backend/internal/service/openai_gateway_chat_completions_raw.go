@@ -111,6 +111,9 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	// can describe the images first. Bridge only this exact failure mode.
 	token, tokenKind, err := s.GetAccessToken(ctx, account)
 	if err != nil {
+		if account.Platform == PlatformGrok {
+			return nil, newGrokAccessTokenFailoverError(err)
+		}
 		return nil, err
 	}
 	if strings.TrimSpace(token) == "" {

@@ -255,7 +255,7 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
-		return nil, fmt.Errorf("get grok access token: %w", err)
+		return nil, newGrokAccessTokenFailoverError(err)
 	}
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	upstreamReq, err := buildGrokResponsesRequest(upstreamCtx, c, account, responsesBody, token, cacheIdentity)
