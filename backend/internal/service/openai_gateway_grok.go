@@ -716,7 +716,7 @@ func buildGrokResponsesRequest(ctx context.Context, c *gin.Context, account *Acc
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	applyGrokCLIHeaders(req.Header)
+	applyGrokCLIHeaders(req.Header, account)
 	applyGrokCacheHeaders(req.Header, cacheIdentity)
 	if c != nil {
 		if v := c.GetHeader("OpenAI-Beta"); strings.TrimSpace(v) != "" {
@@ -728,12 +728,29 @@ func buildGrokResponsesRequest(ctx context.Context, c *gin.Context, account *Acc
 
 // applyGrokCLIHeaders identifies subscription traffic as a supported Grok CLI
 // version. The CLI gateway rejects otherwise valid OAuth requests without it.
-func applyGrokCLIHeaders(headers http.Header) {
+// Account credentials.headers (string-to-string) are applied after defaults so
+// CLIProxyAPI-style auth files can override User-Agent / client version / etc.
+// Authorization and Content-Type are never taken from credentials.
+func applyGrokCLIHeaders(headers http.Header, account *Account) {
 	if headers == nil {
 		return
 	}
 	headers.Set("User-Agent", grokUpstreamUserAgent)
 	headers.Set("X-Grok-Client-Version", grokCLIVersion)
+	if account == nil {
+		return
+	}
+	for name, value := range account.GetGrokCLIHeaders() {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		lower := strings.ToLower(name)
+		if lower == "authorization" || lower == "content-type" || lower == "content-length" || lower == "host" {
+			continue
+		}
+		headers.Set(name, value)
+	}
 }
 
 func (s *OpenAIGatewayService) updateGrokUsageSnapshot(ctx context.Context, account *Account, snapshot *xai.QuotaSnapshot) {
@@ -914,11 +931,29 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 	}
 	now := time.Now()
 	s.updateGrokUsageSnapshot(ctx, account, parseGrokQuotaSnapshot(headers, statusCode, now))
+	bodyText := strings.ToLower(string(responseBody))
 	switch statusCode {
 	case http.StatusUnauthorized:
+		// Permanent auth failures (revoked refresh / no auth context) get a hard error.
+		if strings.Contains(bodyText, "invalid_grant") ||
+			strings.Contains(bodyText, "refresh token has been revoked") ||
+			strings.Contains(bodyText, "no auth context") ||
+			strings.Contains(bodyText, "invalid or expired credentials") {
+			s.disableGrokAccount(ctx, account, "grok credentials unauthorized (permanent): "+truncateForReason(string(responseBody), 180))
+			return
+		}
 		s.tempUnscheduleGrok(ctx, account, 10*time.Minute, "grok credentials unauthorized")
 	case http.StatusForbidden:
+		// spending-limit / entitlement denials should stay unschedulable longer
+		if strings.Contains(bodyText, "spending-limit") ||
+			strings.Contains(bodyText, "personal-team-blocked") ||
+			strings.Contains(bodyText, "subscription") {
+			s.tempUnscheduleGrok(ctx, account, 2*time.Hour, "grok access or entitlement denied")
+			return
+		}
 		s.tempUnscheduleGrok(ctx, account, 30*time.Minute, "grok access or entitlement denied")
+	case http.StatusPaymentRequired:
+		s.tempUnscheduleGrok(ctx, account, 2*time.Hour, "grok payment required / spending limit")
 	case http.StatusTooManyRequests:
 		// updateGrokUsageSnapshot installs both runtime and durable rate-limit state.
 	default:
@@ -926,7 +961,26 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 			s.tempUnscheduleGrok(ctx, account, 2*time.Minute, "grok upstream temporary error")
 		}
 	}
-	_ = responseBody
+}
+
+func (s *OpenAIGatewayService) disableGrokAccount(ctx context.Context, account *Account, reason string) {
+	if s == nil || account == nil {
+		return
+	}
+	s.tempUnscheduleGrok(ctx, account, 24*time.Hour, reason)
+	if s.accountRepo != nil {
+		stateCtx, cancel := openAIAccountStateContext(ctx)
+		defer cancel()
+		_ = s.accountRepo.SetError(stateCtx, account.ID, reason)
+	}
+}
+
+func truncateForReason(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 func (s *OpenAIGatewayService) tempUnscheduleGrok(ctx context.Context, account *Account, cooldown time.Duration, reason string) {

@@ -287,6 +287,186 @@ func TestBuildGrokResponsesRequestRejectsUnsafeAccountBaseURL(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid base url")
 }
 
+func TestGetGrokCLIHeadersReadsStringMapAndIgnoresNonStrings(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{
+		Platform: PlatformGrok,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"headers": map[string]any{
+				"User-Agent":               "grok-shell/0.2.93 (linux; x86_64)",
+				"x-authenticateresponse":   "authenticate-response",
+				"x-grok-client-identifier": "grok-shell",
+				"x-grok-client-version":    "0.2.93",
+				"x-xai-token-auth":         "xai-grok-cli",
+				"skip-me":                  42,
+			},
+		},
+	}
+	headers := account.GetGrokCLIHeaders()
+	require.Equal(t, "grok-shell/0.2.93 (linux; x86_64)", headers["User-Agent"])
+	require.Equal(t, "authenticate-response", headers["x-authenticateresponse"])
+	require.Equal(t, "grok-shell", headers["x-grok-client-identifier"])
+	require.Equal(t, "0.2.93", headers["x-grok-client-version"])
+	require.Equal(t, "xai-grok-cli", headers["x-xai-token-auth"])
+	_, hasSkip := headers["skip-me"]
+	require.False(t, hasSkip)
+
+	require.Nil(t, (&Account{Platform: PlatformOpenAI, Credentials: map[string]any{
+		"headers": map[string]any{"User-Agent": "should-not-apply"},
+	}}).GetGrokCLIHeaders())
+	require.Nil(t, (&Account{Platform: PlatformGrok, Credentials: map[string]any{}}).GetGrokCLIHeaders())
+}
+
+func TestNormalizeGrokCLICredentialsFillsExpiresAtFromExpired(t *testing.T) {
+	t.Parallel()
+
+	creds := map[string]any{
+		"access_token":  "tok",
+		"refresh_token": "ref",
+		"expired":       "2026-07-13T08:51:34Z",
+	}
+	normalizeGrokCLICredentials(creds)
+	require.Equal(t, "2026-07-13T08:51:34Z", creds["expires_at"])
+
+	// existing expires_at wins
+	creds2 := map[string]any{
+		"expired":    "2026-07-13T08:51:34Z",
+		"expires_at": "2026-07-14T00:00:00Z",
+	}
+	normalizeGrokCLICredentials(creds2)
+	require.Equal(t, "2026-07-14T00:00:00Z", creds2["expires_at"])
+}
+
+func TestBuildGrokResponsesRequestAppliesCredentialsHeadersOverDefaults(t *testing.T) {
+	account := &Account{
+		Platform: PlatformGrok,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"base_url": xai.DefaultCLIBaseURL,
+			"headers": map[string]any{
+				"User-Agent":               "grok-shell/0.2.93 (linux; x86_64)",
+				"x-authenticateresponse":   "authenticate-response",
+				"x-grok-client-identifier": "grok-shell",
+				"x-grok-client-version":    "0.2.93",
+				"x-xai-token-auth":         "xai-grok-cli",
+				"Authorization":            "Bearer should-not-override",
+				"Content-Type":             "text/plain",
+			},
+		},
+	}
+
+	req, err := buildGrokResponsesRequest(context.Background(), nil, account, []byte(`{"model":"grok-4.3"}`), "access-token", "cache-id")
+	require.NoError(t, err)
+	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", req.URL.String())
+	require.Equal(t, "Bearer access-token", req.Header.Get("Authorization"))
+	require.Equal(t, "application/json", req.Header.Get("Content-Type"))
+	require.Equal(t, "grok-shell/0.2.93 (linux; x86_64)", req.Header.Get("User-Agent"))
+	require.Equal(t, "0.2.93", req.Header.Get("X-Grok-Client-Version"))
+	require.Equal(t, "authenticate-response", req.Header.Get("x-authenticateresponse"))
+	require.Equal(t, "grok-shell", req.Header.Get("x-grok-client-identifier"))
+	require.Equal(t, "xai-grok-cli", req.Header.Get("x-xai-token-auth"))
+	require.Equal(t, "cache-id", req.Header.Get(grokConversationIDHeader))
+}
+
+func TestBuildGrokResponsesRequestKeepsDefaultCLIHeadersWithoutCredentialsHeaders(t *testing.T) {
+	account := &Account{
+		Platform: PlatformGrok,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"base_url": xai.DefaultCLIBaseURL,
+		},
+	}
+	req, err := buildGrokResponsesRequest(context.Background(), nil, account, []byte(`{"model":"grok-4.3"}`), "access-token", "")
+	require.NoError(t, err)
+	require.Equal(t, grokUpstreamUserAgent, req.Header.Get("User-Agent"))
+	require.Equal(t, grokCLIVersion, req.Header.Get("X-Grok-Client-Version"))
+	require.Empty(t, req.Header.Get("x-xai-token-auth"))
+}
+
+func TestSendCCUpstreamRequestAppliesGrokCredentialsHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	account := &Account{
+		ID:       61,
+		Platform: PlatformGrok,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"base_url": xai.DefaultCLIBaseURL,
+			"headers": map[string]any{
+				"User-Agent":               "grok-shell/0.2.93 (linux; x86_64)",
+				"x-authenticateresponse":   "authenticate-response",
+				"x-grok-client-identifier": "grok-shell",
+				"x-grok-client-version":    "0.2.93",
+				"x-xai-token-auth":         "xai-grok-cli",
+			},
+		},
+	}
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"ok"}`)),
+	}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+
+	targetURL, err := xai.BuildChatCompletionsURL(account.GetGrokBaseURL())
+	require.NoError(t, err)
+	resp, err := svc.sendCCUpstreamRequest(context.Background(), c, account, targetURL, []byte(`{"model":"grok"}`), false, "access-token", "sub2api-grok/1.0", "cc-cache")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	_ = resp.Body.Close()
+
+	require.Equal(t, "grok-shell/0.2.93 (linux; x86_64)", upstream.lastReq.Header.Get("User-Agent"))
+	require.Equal(t, "0.2.93", upstream.lastReq.Header.Get("X-Grok-Client-Version"))
+	require.Equal(t, "authenticate-response", upstream.lastReq.Header.Get("x-authenticateresponse"))
+	require.Equal(t, "grok-shell", upstream.lastReq.Header.Get("x-grok-client-identifier"))
+	require.Equal(t, "xai-grok-cli", upstream.lastReq.Header.Get("x-xai-token-auth"))
+	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
+	require.Equal(t, "cc-cache", upstream.lastReq.Header.Get(grokConversationIDHeader))
+}
+
+func TestSendCCUpstreamRequestDoesNotApplyGrokCredentialsHeadersOnNonGrok(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	account := &Account{
+		ID:       62,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://api.openai.com/v1",
+			"headers": map[string]any{
+				"User-Agent":       "grok-shell/0.2.93 (linux; x86_64)",
+				"x-xai-token-auth": "xai-grok-cli",
+			},
+		},
+	}
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"ok"}`)),
+	}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+
+	resp, err := svc.sendCCUpstreamRequest(context.Background(), c, account, "https://api.openai.com/v1/chat/completions", []byte(`{"model":"gpt-4o"}`), false, "sk-test", "custom-ua", "")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	_ = resp.Body.Close()
+
+	require.Equal(t, "custom-ua", upstream.lastReq.Header.Get("User-Agent"))
+	require.Empty(t, upstream.lastReq.Header.Get("X-Grok-Client-Version"))
+	require.Empty(t, upstream.lastReq.Header.Get("x-xai-token-auth"))
+}
+
 func TestGrokMediaGenerationGateCoversImagesAndVideo(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -635,49 +815,6 @@ func TestForwardGrokMediaVideoStatusUsesGETWithoutBody(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.JSONEq(t, `{"id":"request-123","status":"completed"}`, recorder.Body.String())
 	require.Equal(t, "xai-video-req", result.RequestID)
-}
-
-func TestForwardGrokMediaVideoMutationEndpoints(t *testing.T) {
-	t.Setenv(xai.EnvAllowUnsafeURLOverrides, "true")
-	gin.SetMode(gin.TestMode)
-
-	tests := []struct {
-		name     string
-		endpoint GrokMediaEndpoint
-		path     string
-	}{
-		{name: "edit", endpoint: GrokMediaEndpointVideosEdits, path: "/videos/edits"},
-		{name: "extension", endpoint: GrokMediaEndpointVideosExtensions, path: "/videos/extensions"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			body := []byte(`{"model":"grok-imagine-video","prompt":"continue","video":{"url":"https://example.com/in.mp4"},"duration":6}`)
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1"+tt.path, bytes.NewReader(body))
-			c.Request.Header.Set("Content-Type", "application/json")
-
-			account := &Account{
-				ID: 71, Name: "grok", Platform: PlatformGrok, Type: AccountTypeAPIKey, Concurrency: 1,
-				Credentials: map[string]any{"api_key": "api-key", "base_url": "https://xai.test/v1"},
-			}
-			upstream := &httpUpstreamRecorder{resp: &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"request_id":"video-mutation-123"}`)),
-			}}
-			svc := &OpenAIGatewayService{httpUpstream: upstream}
-
-			result, err := svc.ForwardGrokMedia(context.Background(), c, account, tt.endpoint, "", body, "application/json")
-			require.NoError(t, err)
-			require.Equal(t, "https://xai.test/v1"+tt.path, upstream.lastReq.URL.String())
-			require.Equal(t, http.MethodPost, upstream.lastReq.Method)
-			require.JSONEq(t, string(body), string(upstream.lastBody))
-			require.Equal(t, "video-mutation-123", result.ResponseID)
-			require.Equal(t, 1, result.VideoCount)
-			require.Equal(t, 6, result.VideoDurationSeconds)
-		})
-	}
 }
 
 func TestBindGrokMediaVideoRequestAccountUsesRequestIDStickyHash(t *testing.T) {

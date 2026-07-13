@@ -1289,6 +1289,71 @@ func isOfficialGrokAPIBaseURL(raw string) bool {
 	return path == "" || path == strings.TrimRight(defaultURL.Path, "/")
 }
 
+// GetGrokCLIHeaders returns optional CLI headers from credentials.headers.
+// Accepted shape: object of string-to-string. Non-string values are ignored.
+// Values must never be logged.
+func (a *Account) GetGrokCLIHeaders() map[string]string {
+	if a == nil || !a.IsGrok() || a.Credentials == nil {
+		return nil
+	}
+	return stringMappingFromRaw(a.Credentials["headers"])
+}
+
+// normalizeGrokCLICredentials fills expires_at from CLIProxyAPI-style "expired"
+// when expires_at is missing, so token refresh / request-path refresh work.
+func normalizeGrokCLICredentials(creds map[string]any) {
+	if creds == nil {
+		return
+	}
+	if _, ok := creds["expires_at"]; ok {
+		// Keep explicit expires_at, but still accept empty string as missing.
+		switch v := creds["expires_at"].(type) {
+		case string:
+			if strings.TrimSpace(v) != "" {
+				return
+			}
+		case nil:
+			// continue
+		default:
+			return
+		}
+	}
+	raw, ok := creds["expired"]
+	if !ok || raw == nil {
+		return
+	}
+	switch v := raw.(type) {
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return
+		}
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			creds["expires_at"] = t.UTC().Format(time.RFC3339)
+			return
+		}
+		if ts, err := strconv.ParseInt(s, 10, 64); err == nil && ts > 0 {
+			creds["expires_at"] = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+		}
+	case float64:
+		if v > 0 {
+			creds["expires_at"] = time.Unix(int64(v), 0).UTC().Format(time.RFC3339)
+		}
+	case int64:
+		if v > 0 {
+			creds["expires_at"] = time.Unix(v, 0).UTC().Format(time.RFC3339)
+		}
+	case int:
+		if v > 0 {
+			creds["expires_at"] = time.Unix(int64(v), 0).UTC().Format(time.RFC3339)
+		}
+	case json.Number:
+		if ts, err := v.Int64(); err == nil && ts > 0 {
+			creds["expires_at"] = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+		}
+	}
+}
+
 func (a *Account) GetGrokAccessToken() string {
 	if !a.IsGrok() {
 		return ""

@@ -965,8 +965,10 @@ func (h *AccountHandler) Delete(c *gin.Context) {
 // TestAccountRequest represents the request body for testing an account
 type TestAccountRequest struct {
 	ModelID string `json:"model_id"`
-	Prompt  string `json:"prompt"`
-	Mode    string `json:"mode"`
+	// Model is accepted as an alias of model_id for admin UI / API clients.
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	Mode   string `json:"mode"`
 }
 
 type SyncFromCRSRequest struct {
@@ -995,9 +997,13 @@ func (h *AccountHandler) Test(c *gin.Context) {
 	var req TestAccountRequest
 	// Allow empty body, model_id is optional
 	_ = c.ShouldBindJSON(&req)
+	modelID := strings.TrimSpace(req.ModelID)
+	if modelID == "" {
+		modelID = strings.TrimSpace(req.Model)
+	}
 
 	// Use AccountTestService to test the account with SSE streaming
-	if err := h.accountTestService.TestAccountConnection(c, accountID, req.ModelID, req.Prompt, req.Mode); err != nil {
+	if err := h.accountTestService.TestAccountConnection(c, accountID, modelID, req.Prompt, req.Mode); err != nil {
 		// Error already sent via SSE, just log
 		return
 	}

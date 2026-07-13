@@ -133,14 +133,31 @@ func (p *GrokTokenProvider) markTempUnschedulable(account *Account, refreshErr e
 	if refreshErr != nil {
 		redactedErr = logredact.RedactText(refreshErr.Error())
 	}
+	bgCtx := context.Background()
 	if isNonRetryableRefreshError(refreshErr) {
-		if err := p.accountRepo.SetError(context.Background(), account.ID, "grok token refresh failed (non-retryable): "+redactedErr); err != nil {
+		// Permanent credential failure: hard-disable scheduling so the account
+		// is not selected again until an operator re-imports credentials.
+		if err := p.accountRepo.SetError(bgCtx, account.ID, "grok token refresh failed (non-retryable): "+redactedErr); err != nil {
 			slog.Warn(grokTokenProviderLogComponent+".set_error_status_failed", "account_id", account.ID, "error", err)
+		}
+		// Also set a far temp-unschedulable marker for sticky/in-memory caches.
+		far := now.Add(24 * time.Hour)
+		if err := p.accountRepo.SetTempUnschedulable(bgCtx, account.ID, far, "grok credentials unauthorized (non-retryable refresh): "+redactedErr); err != nil {
+			slog.Warn(grokTokenProviderLogComponent+".set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
+		}
+		if p.tempUnschedCache != nil {
+			state := &TempUnschedState{
+				UntilUnix:       far.Unix(),
+				TriggeredAtUnix: now.Unix(),
+				ErrorMessage:    grokTempUnschedulableErrorCode + ": non-retryable: " + redactedErr,
+			}
+			if err := p.tempUnschedCache.SetTempUnsched(bgCtx, account.ID, state); err != nil {
+				slog.Warn(grokTokenProviderLogComponent+".temp_unsched_cache_set_failed", "account_id", account.ID, "error", err)
+			}
 		}
 		return
 	}
 	reason := "grok token refresh failed on request path: " + redactedErr
-	bgCtx := context.Background()
 	if err := p.accountRepo.SetTempUnschedulable(bgCtx, account.ID, until, reason); err != nil {
 		slog.Warn(grokTokenProviderLogComponent+".set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
 		return

@@ -96,6 +96,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
 		return nil, err
 	}
+	if input.Platform == PlatformGrok {
+		normalizeGrokCLICredentials(input.Credentials)
+	}
 
 	account := &Account{
 		Name:        input.Name,
@@ -230,6 +233,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		// 校验并规范化请求头覆写配置（header 名小写化、格式检查）
 		if err := NormalizeHeaderOverrideCredentials(account.Credentials); err != nil {
 			return nil, err
+		}
+		if account.Platform == PlatformGrok {
+			normalizeGrokCLICredentials(account.Credentials)
 		}
 	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
@@ -452,6 +458,13 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	// 校验并规范化请求头覆写配置（批量路径为 JSONB 顶层 key 合并，直接校验增量即可）
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
 		return nil, err
+	}
+	// Best-effort Grok CLI field normalization for bulk credential patches.
+	// Safe for non-Grok accounts: only fills expires_at when expired is present.
+	if input.Credentials != nil {
+		if _, hasExpired := input.Credentials["expired"]; hasExpired {
+			normalizeGrokCLICredentials(input.Credentials)
+		}
 	}
 
 	// Prepare bulk updates for columns and JSONB fields.

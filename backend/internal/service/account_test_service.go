@@ -582,13 +582,8 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	// Create OpenAI Responses API payload. OAuth accounts use ChatGPT Codex
-	// upstream and must apply the same model normalization as real forwarding.
-	upstreamTestModelID := testModelID
-	if isOAuth {
-		upstreamTestModelID = normalizeOpenAIModelForUpstream(credentialAccount, testModelID)
-	}
-	payload := createOpenAITestPayload(upstreamTestModelID, isOAuth)
+	// Create OpenAI Responses API payload
+	payload := createOpenAITestPayload(testModelID, isOAuth)
 	payloadBytes, _ := json.Marshal(payload)
 
 	// Send test_start event
@@ -668,8 +663,14 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 	}
 
 	testModelID := strings.TrimSpace(modelID)
-	if testModelID == "" {
-		testModelID = "grok-4.3"
+	if testModelID == "" || testModelID == "grok" {
+		// Default to a CLI-friendly model. grok-4.3 often returns 402
+		// personal-team-blocked for subscription/CLI accounts.
+		if account != nil && account.IsGrokOAuth() {
+			testModelID = "grok-4.5"
+		} else {
+			testModelID = "grok-4.3"
+		}
 	}
 	if mapped := strings.TrimSpace(account.GetMappedModel(testModelID)); mapped != "" {
 		testModelID = mapped
@@ -724,7 +725,7 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+authToken)
-	applyGrokCLIHeaders(req.Header)
+	applyGrokCLIHeaders(req.Header, account)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {

@@ -1,4 +1,7 @@
-# Sub2API
+# Sub2API（Grok CLI 增强完整版）
+
+> 本仓库是 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 的 **完整源码 fork**，额外增强 Grok CLI 账号兼容。  
+> 快速说明见根目录 [README.md](README.md)。下面保留上游中文文档主体。
 
 <div align="center">
 
@@ -12,7 +15,7 @@
 
 **AI API 网关平台 - 订阅配额分发管理**
 
-[English](README.md) | 中文 | [日本語](README_JA.md)
+[Fork 说明 / 快速开始](README.md) | 中文完整文档 | [日本語](README_JA.md)
 
 </div>
 
