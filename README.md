@@ -173,11 +173,6 @@ pnpm build
 ## 致谢
 
 感谢 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 原作者与社区。
-
----
-
-> 👤 作者：涤生AGI | 🐙 github.com/dishenglee | 📡 公众号：涤生AGI
-
 ---
 
 **LINUX DO** — a new kind of community, where tech enthusiasts gather.  
